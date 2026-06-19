@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""commit-gate commit-msg hook — the enforcement FLOOR.
+
+Runs on EVERY commit (terminal, IDE, or Claude session), after the message is
+finalised. Because it reads the FINAL message file, it works uniformly no matter
+how the message was provided (-m, repeated -m, -F, heredoc, or the editor) — the
+weakness the PreToolUse-only design had.
+
+  * validates the subject against the conventional-commit template;
+  * if issue handling is configured (issuePrefixes/issueRefRegex), derives the
+    issue id from the message or branch and stamps/normalises `Refs: <ISSUE>`;
+  * aborts the commit (exit 1) with a precise reason on a violation.
+
+Skips merge / fixup! / squash! / amend! messages. git passes $1 = message file.
+Installed (by install.py) as a small shim in the repo's hooks dir that execs
+this file with an absolute path, so its `../bin` import always resolves.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin"))
+import lib_commit as L  # noqa: E402
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        return 0
+    msg_file = sys.argv[1]
+    cwd = os.getcwd()
+
+    # Skip git-generated messages for an in-progress merge / revert / cherry-pick
+    # — detected by git STATE, not by a "Merge "/"Revert " string prefix (a
+    # hand-typed subject starting with those words must still be validated).
+    for marker in ("MERGE_HEAD", "REVERT_HEAD", "CHERRY_PICK_HEAD"):
+        if L.git("rev-parse", "-q", "--verify", marker, cwd=cwd).returncode == 0:
+            return 0
+    try:
+        with open(msg_file, "r", encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError:
+        return 0
+    first = next((ln for ln in raw.splitlines() if ln.strip()), "")
+    if first.startswith(("fixup!", "squash!", "amend!")):   # autosquash markers
+        return 0
+
+    # Drop git's comment lines (`# ...`) before evaluating.
+    stripped = "\n".join(ln for ln in raw.splitlines()
+                         if not ln.lstrip().startswith("#"))
+    cfg = L.load_config(cwd)
+    branch = L.head_info(cwd)["branch"]
+    result = L.evaluate_message(stripped, branch, cfg)
+    if not result.ok:
+        sys.stderr.write(f"commit-gate: {result.deny_reason}\n")
+        return 1  # abort the commit
+
+    # Normalise to the canonical, issue-stamped message (idempotent).
+    with open(msg_file, "w", encoding="utf-8") as fh:
+        fh.write(L.canonical_message(result) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    # Fail OPEN even at the gate: a hook bug must not wedge every commit. The
+    # stderr note keeps a silent regression visible.
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"commit-gate(commit-msg): internal error, allowing: {exc}\n")
+        sys.exit(0)

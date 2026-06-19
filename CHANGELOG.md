@@ -7,9 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Breaking redesign to a layered model (warrants a **2.0.0** release): enforcement
+moves from a blocking PreToolUse hook to a `commit-msg` git hook, and the
+per-commit Linear API integration is removed in favor of native tracker linking.
+
 ### Added
 
+- `githooks/commit-msg` — the enforcement **floor**: validates the final commit
+  message and stamps the `Refs:` trailer for every commit regardless of client
+  (`-m` / repeated `-m` / `-F` / heredoc / editor all handled uniformly).
+- `bin/pre_commit_advisor.py` — a non-blocking PreToolUse **advisor** that
+  auto-stamps the trailer and nudges the agent.
+- `install.py` `--no-floor` / `--no-advisor` flags; the floor installs as a
+  non-clobbering shim in the repo's hooks dir (detects husky/`core.hooksPath`).
 - `RELEASING.md` — release-process checklist (SemVer + Keep a Changelog).
+
+### Changed
+
+- Commit enforcement now runs at the git layer (`commit-msg`), so it covers
+  **all** commits — not just agent-session ones — and handles `-F`/heredoc/editor
+  messages, which the PreToolUse-only design rejected.
+- The PreToolUse hook is now advisory (auto-stamp + nudge) and never hard-blocks.
+
+### Removed
+
+- The per-commit Linear GraphQL integration: `bin/post_commit_linear.py`, the
+  `post-commit` git hook, the `linear` config block, the dedupe ledger, and the
+  `LINEAR_API_KEY` requirement. Issue linking is delegated to the tracker's
+  native git integration; commit-gate ensures `Refs: <ID>` is present.
+- `githooks/prepare-commit-msg` — superseded by `commit-msg` (which sees the
+  final message).
 
 ## [1.0.0] - 2026-06-19
 

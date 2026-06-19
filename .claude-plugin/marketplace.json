@@ -4,7 +4,7 @@
   "plugins": [
     {
       "name": "commit-gate",
-      "description": "Deterministically enforce a commit-message template and update Linear on every git commit, via PreToolUse/PostToolUse hooks.",
+      "description": "Enforce a conventional-commit template + issue refs on every commit via a commit-msg git hook, plus an advisory PreToolUse auto-stamp/nudge. Linking via your tracker's native integration.",
       "source": "./"
     }
   ]

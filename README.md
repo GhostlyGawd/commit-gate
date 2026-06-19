@@ -1,159 +1,134 @@
 # commit-gate
 
-Deterministically enforce a **commit-message template** and **update Linear on
-every `git commit`** in an interactive Claude Code session — packaged as a
-Claude Code skill/plugin.
+Enforce a conventional-commit message template and keep work linked to your
+issue tracker on **every** commit — and give your Claude Code agent a fast
+in-session nudge so it gets commits right the first time.
 
-It is the hybrid of three independent designs: the safest enforcement engine
-(rewrite-before-commit, **deny rather than fabricate**, per-SHA dedupe, robust
-commit detection, raw-commit git backstop) wrapped in clean, vendorable plugin
-packaging, with a skill that genuinely installs rather than just documents.
+## Architecture: two layers, each in its right place
 
-## The core idea
+commit-gate deliberately separates "the gate" from "the agent helper", and
+delegates issue linking to your tracker:
 
-A **skill cannot be the trigger** — skills load on the model's judgment, which
-is not deterministic. Only **hooks** fire mechanically on every tool event. So:
-
-- the **hooks** are the trigger and the actor (deterministic), and
-- the **skill** is the carrier/installer/manual.
-
-Two hooks, both on the `Bash` tool:
-
-| Phase | Event | Does |
+| Layer | What it does | Where it lives |
 |---|---|---|
-| Before the commit runs | `PreToolUse` | Validate the message. Rewrite (add `Refs:` trailer) via `updatedInput`, or **deny** with a precise reason. The model cannot commit a non-conforming message. |
-| After the commit lands | `PostToolUse` | Call the **Linear GraphQL API directly** with `LINEAR_API_KEY`. No model, no MCP — so the action is as deterministic as the trigger. |
+| **Floor** | A `commit-msg` git hook: validates the **final** message against the template and stamps a `Refs: <ISSUE>` trailer; **aborts** on violation. Runs on every commit — terminal, IDE, CI, or agent — and because it reads the final message, `-m`, repeated `-m`, `-F`, heredoc, and editor commits all work uniformly. | git hook (`commit-msg`) |
+| **Advisor** | A Claude Code `PreToolUse` hook on the agent's `git commit` calls: **auto-stamps** the trailer and gives a fast "here's the fix" nudge. It **never hard-blocks** — the floor is the gate. | Claude settings (`PreToolUse`) |
+| **Linking** | Issue linking. | **Your tracker's native git integration.** commit-gate just guarantees `Refs: <ID>` is present; the integration does the linking. No tokens, no API calls. |
 
-## How it meets the three requirements
+Why this split: deterministic, universal enforcement belongs at the **git layer**
+(it sees every commit and the final message). Agent-loop help belongs in the
+**Claude hook** (fast feedback, auto-fix). And issue linking is already solved by
+trackers' native integrations, so commit-gate doesn't reimplement it — it only
+ensures the ref is in the message.
 
-1. **Interactive mode** — `PreToolUse`/`PostToolUse` hooks fire during a live
-   `claude` session. No GitHub Actions, no `claude -p` headless.
-2. **Every time, deterministic** — the runtime invokes the hooks on every Bash
-   tool call regardless of what the model decides; the script (not the model)
-   performs the template decision and the Linear call.
-3. **Saved as a skill** — `skills/commit-gate/SKILL.md` carries a real,
-   idempotent install/verify step (`install.py`); the skill is not vestigial.
+> This is a deliberate redesign of the earlier blocking-PreToolUse + per-commit
+> Linear-API approach, whose enforcement only covered agent-session commits and
+> whose `-F`/heredoc handling was brittle. See `CHANGELOG.md`.
+
+## Install (per-repo)
+
+```
+python /path/to/commit-gate/install.py --target /path/to/repo
+python /path/to/commit-gate/install.py --target /path/to/repo --check   # -> ACTIVE
+# the floor works immediately; restart claude (or /hooks) so the advisor loads
+```
+
+- The **floor** is installed as a tiny shim in the repo's hooks dir that execs
+  the plugin's `githooks/commit-msg` with the detected interpreter. If a
+  `commit-msg` hook already exists (husky/lefthook) or `core.hooksPath` is custom,
+  commit-gate installs into the right place and won't clobber a foreign hook —
+  it prints how to chain it instead.
+- The **advisor** is written to `.claude/settings.local.json` by default
+  (`--scope project` for the tracked `.claude/settings.json`).
+- Flags: `--no-floor`, `--no-advisor`, `--uninstall`, `--check`.
+
+## Issue linking (native — no tokens)
+
+commit-gate stamps `Refs: <ISSUE>` (derived from the message or the branch name)
+on every commit. Turn on your tracker's git integration to do the linking:
+
+- **Linear:** enable the GitHub integration. It auto-links issues referenced by
+  id and can transition them on PR events. Branch names like `eng-441-foo` and
+  the stamped `Refs: ENG-441` both link.
+
+This replaces the old per-developer `LINEAR_API_KEY` + a comment-on-every-commit
+(noisy, and only covered commits made through the agent).
+
+## Configure (`commit-gate.config.json`)
+
+- `template.types`, `template.subjectMaxLen` — the subject rule (always enforced).
+- `template.issuePrefixes` — e.g. `["ENG", "OPS"]`. Issue requirement and `Refs:`
+  stamping are **off until this (or `issueRefRegex`) is set** — deliberately, so
+  an unconfigured wildcard can't match `utf-8` / `sha-256`. Matched
+  case-insensitively, so `eng-441` derives `ENG-441`.
+
+## Workflow
+
+Agent runs `git commit -m "fix login"` on branch `eng-441-foo`:
+
+1. **Advisor** sees the malformed subject and nudges the agent ("the commit-msg
+   hook will reject this — subject must match `<type>(<scope>): <subject>`").
+   It does **not** block.
+2. Agent retries `git commit -m "fix(auth): handle failed login"`. The subject is
+   valid but the issue ref is missing; the advisor **auto-stamps** `Refs: ENG-441`
+   (rewriting the command) so the floor won't have to reject it.
+3. The commit runs. The **floor** reads the final message, confirms it conforms,
+   normalises it, and lets the commit land.
+4. Linear's native integration links `ENG-441`.
+
+A human committing in their own terminal skips steps 1–2 (no agent) but still
+hits the **floor** at step 3 — that's the universal enforcement the old
+PreToolUse-only design lacked.
 
 ## Layout
 
 ```
 commit-gate/
 ├── .claude-plugin/
-│   ├── plugin.json                # plugin manifest
-│   └── marketplace.json           # one-plugin marketplace (source: "./")
-├── examples/team-settings.json    # copy-paste team auto-enablement keys
-├── hooks/hooks.json               # plugin hook registration (${CLAUDE_PLUGIN_ROOT})
+│   ├── plugin.json
+│   └── marketplace.json           # one-plugin marketplace (source "./")
+├── examples/team-settings.json
 ├── bin/
-│   ├── lib_commit.py              # shared: detection, template, Linear, dedupe
-│   ├── pre_commit_gate.py         # PreToolUse hook
-│   └── post_commit_linear.py      # PostToolUse hook
-├── githooks/                      # optional raw-commit backstop (core.hooksPath)
-│   ├── prepare-commit-msg
-│   └── post-commit
-├── skills/commit-gate/SKILL.md    # the carrier/installer skill
-├── commit-gate.config.json        # team-tunable template + Linear config
-└── install.py                     # cross-platform installer
+│   ├── lib_commit.py              # shared: detection, template, issue derivation
+│   └── pre_commit_advisor.py      # PreToolUse advisor (nudge + auto-stamp)
+├── githooks/commit-msg            # the enforcement floor
+├── hooks/hooks.json               # registers the advisor (${CLAUDE_PLUGIN_ROOT})
+├── skills/commit-gate/SKILL.md
+├── commit-gate.config.json
+├── install.py
+├── CHANGELOG.md
+└── RELEASING.md
 ```
 
-## Install
+## Team distribution (marketplace)
 
-**Single developer / any repo (recommended):**
+This directory is also a one-plugin marketplace. Push it to a git repo
+(`GhostlyGawd/commit-gate`) and either:
 
-```
-python install.py --target /path/to/repo            # writes .claude/settings.local.json
-python install.py --target /path/to/repo --check    # verify -> ACTIVE
-export LINEAR_API_KEY=lin_api_xxx                    # in the shell that launches claude
-# restart claude (or /hooks) so settings are re-read
-```
+- *Manual:* `/plugin marketplace add GhostlyGawd/commit-gate` then
+  `/plugin install commit-gate@commit-gate-marketplace`.
+- *Auto-enable:* commit the keys in `examples/team-settings.json` to the
+  consuming repo's tracked `.claude/settings.json`; teammates are prompted on
+  clone. `enabledPlugins` is an **object** (`"plugin@marketplace": true`).
 
-`--scope project` writes to the committed `.claude/settings.json` instead — but
-note it uses absolute machine-specific paths, so that's only appropriate for a
-single machine. For team-wide sharing use the plugin route below.
+Note: the marketplace route installs the **advisor** (a Claude plugin hook); the
+**floor** is a git hook, so run `install.py --no-advisor` (or `--with`-style
+setup) to add the `commit-msg` hook per repo, or commit it via your own git-hook
+manager. Plugins can't install git hooks for you.
 
-**Team-wide (marketplace, zero per-person setup):** this directory is *also* a
-one-plugin marketplace (`.claude-plugin/marketplace.json`, plugin `source: "./"`),
-so push it to a git repo (e.g. `GhostlyGawd/commit-gate`) and distribute it one of
-two ways:
+**Worktrees:** if the advisor is enabled per-person via `/plugin install`, its
+flag lives in gitignored `.claude/settings.local.json`, so Claude worktrees start
+with it off — add that file to the repo's `.worktreeinclude`. Committing
+enablement to the tracked `.claude/settings.json` avoids this.
 
-- *Manual, per person:*
-  ```
-  /plugin marketplace add GhostlyGawd/commit-gate
-  /plugin install commit-gate@commit-gate-marketplace
-  ```
-- *Auto-enable for everyone (recommended):* commit these keys to the **consuming
-  repo's tracked** `.claude/settings.json` (ready to copy in
-  `examples/team-settings.json`):
-  ```json
-  {
-    "extraKnownMarketplaces": {
-      "commit-gate-marketplace": {
-        "source": { "source": "github", "repo": "GhostlyGawd/commit-gate" },
-        "autoUpdate": true
-      }
-    },
-    "enabledPlugins": { "commit-gate@commit-gate-marketplace": true }
-  }
-  ```
-  On clone + workspace-trust, teammates are prompted to install the marketplace
-  and the plugin. `hooks/hooks.json` uses `${CLAUDE_PLUGIN_ROOT}`, so no absolute
-  paths leak (unlike the `install.py` route). Note: `enabledPlugins` is an
-  **object** (`"plugin@marketplace": true`), not an array.
+## Limits
 
-**Worktrees gotcha.** `/plugin install` records the enable flag in gitignored
-`.claude/settings.local.json`, so Claude-created worktrees start with the plugin
-**OFF** — add `.claude/settings.local.json` to the consuming repo's
-`.worktreeinclude` (gitignore-syntax; only copies files that are also gitignored).
-Committing enablement to the *tracked* `.claude/settings.json` (above) sidesteps
-this entirely, since tracked files are always present in a worktree.
-
-**Updates.** Bump `version` in `.claude-plugin/plugin.json` to push updates
-(`autoUpdate: true` makes teammates pick them up); or omit `version` to treat
-every commit as a new version. The Windows `python3`-vs-`python` caveat below
-applies to this route too — `install.py` bakes in the detected interpreter.
-
-**Optional raw-commit backstop:** `--with-git-backstop` wires `core.hooksPath`
-to `githooks/` so commits made *outside* a Claude session are also templated and
-Linear-synced. The per-SHA dedupe ledger keeps the git hook and the Claude
-PostToolUse hook from double-posting.
-
-## Configuration (`commit-gate.config.json`)
-
-- `template.issuePrefixes` — your team's issue prefixes, e.g. `["ENG", "OPS"]`.
-  **Issue handling (requirement, `Refs:` stamping, Linear sync) is OFF until
-  this — or an explicit `template.issueRefRegex` — is set.** This is deliberate:
-  an unconfigured wildcard would match tokens like `utf-8` / `sha-256` and stamp
-  garbage. Prefixes match case-insensitively, so `eng-481` → `ENG-481`.
-- `template.types` / `subjectMaxLen` — the conventional-commit subject rule
-  (always enforced, independent of issue handling).
-- `linear.*` — `enabled`, `action` (`comment` | `comment+move`),
-  `commentFormat`, `moveToStateName`.
-
-Note: the PreToolUse rewrite path returns `permissionDecision: "allow"`, which
-auto-approves the (corrected) commit — it bypasses any permission prompt you'd
-otherwise get for `git commit`. The hook vouches for the command it rewrote.
-
-## Worked examples
-
-**Template.** Model runs `git commit -m "fix login"`. The subject fails the
-template → PreToolUse **denies** with the rule. Model retries
-`git commit -m "fix(auth): handle failed login"` on branch `eng-441-login`; the
-issue ref is missing but derivable, the command is simple → PreToolUse **allows
-with `updatedInput`**, appending `-m "Refs: ENG-441"`. The commit lands
-conforming and issue-stamped — the model could not have committed otherwise.
-
-**Linear.** That commit lands. PostToolUse reads HEAD, extracts `ENG-441`
-(case-insensitively, so a lowercase branch still works), resolves the issue via
-GraphQL, and posts ``Commit `a1b2c3d` on `eng-441-login`: fix(auth)…``. The
-model did nothing for this.
-
-## Limits (honest)
-
-- Commits typed in another terminal aren't Bash tool calls → not seen in-session
-  (use `--with-git-backstop`; remote `pre-receive` is the only true guard for
-  raw `--no-verify`).
-- Git **aliases** (`git ci`) and non-CLI writers aren't detected.
-- In-session rewrite is applied only to **simple** commands; a complex compound
-  commit needing a trailer is denied with guidance, never rewritten unsafely.
-- Requires Python 3 on PATH. The plugin `hooks/hooks.json` invokes `python3`;
-  on Windows where only `python` exists, prefer `install.py` (it bakes in the
-  detected interpreter via `sys.executable`).
+- The floor is a git hook: a `git commit --no-verify` skips it. For a hard,
+  un-bypassable guard, add a server-side `pre-receive` hook.
+- It governs the `git` CLI; aliases (`git ci`) and non-CLI writers aren't seen.
+- The advisor relies on PreToolUse `updatedInput`/`additionalContext`; if a
+  Claude Code version doesn't honor them, the **floor still enforces** correctly
+  — the advisor is pure convenience.
+- Requires Python 3 on PATH. The plugin `hooks.json` invokes `python3`; on
+  Windows where only `python` exists, prefer `install.py` (it bakes in the
+  detected interpreter).

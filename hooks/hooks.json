@@ -6,20 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/pre_commit_gate.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/pre_commit_advisor.py\"",
             "timeout": 15
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/post_commit_linear.py\"",
-            "timeout": 20
           }
         ]
       }

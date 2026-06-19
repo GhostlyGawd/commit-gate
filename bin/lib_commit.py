@@ -2,24 +2,23 @@
 """commit-gate shared library.
 
 Pure, dependency-free (Python 3 stdlib only) helpers shared by:
-  - bin/pre_commit_gate.py     (PreToolUse hook: validate/auto-fix a commit)
-  - bin/post_commit_linear.py  (PostToolUse hook: deterministic Linear sync)
-  - githooks/prepare-commit-msg (raw-commit template backstop)
-  - githooks/post-commit        (raw-commit Linear backstop)
+  - bin/pre_commit_advisor.py  (PreToolUse hook: advise the agent + auto-stamp)
+  - githooks/commit-msg        (the enforcement FLOOR: validate the final
+                                message + stamp the issue trailer, for EVERY
+                                commit regardless of client)
 
 Design notes (why it is the way it is):
-  * Commit DETECTION and message PARSING are done here with shlex tokenisation,
-    not regex-on-the-raw-string, so compound commands (`git add -A && git commit`),
-    env-prefixed commands (`GIT_AUTHOR_NAME=x git commit`), and wrapper words
-    (`command git commit`) are handled robustly. (Fixes the brittle regex in the
-    "minimal" design and the shallow detection in others.)
+  * Commit DETECTION and message PARSING use shlex tokenisation, not
+    regex-on-the-raw-string, so compound (`git add -A && git commit`),
+    env-prefixed (`GIT_AUTHOR_NAME=x git commit`), and wrapper (`command git
+    commit`) forms are handled robustly.
   * Issue-id matching is CASE-INSENSITIVE and normalised to upper-case, so a
-    lowercase branch like `eng-481-foo` still yields `ENG-481`. (Fixes the shipped
-    lowercase bug in the "minimal" design whose headline example did not run.)
-  * Template enforcement DENIES a malformed subject rather than silently
-    fabricating a type. (Rejects the `wip:` -> `chore:` fabrication.)
-  * The Linear action is performed HERE over HTTPS with urllib — never delegated
-    to the model / MCP — so the action is as deterministic as the trigger.
+    lowercase branch like `eng-481-foo` still yields `ENG-481`.
+  * Template validation DENIES a malformed subject rather than fabricating a
+    type. The commit-msg git hook is the GATE; the PreToolUse hook only advises
+    and auto-stamps (never hard-blocks).
+  * Issue linking is delegated to Linear's native GitHub integration — this
+    library only ensures a `Refs: <ID>` ref is present so Linear can link it.
 """
 
 from __future__ import annotations
@@ -30,8 +29,6 @@ import re
 import shlex
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 
 # --------------------------------------------------------------------------- #
 # Config
@@ -50,14 +47,6 @@ DEFAULT_CONFIG = {
         "issuePrefixes": [],          # e.g. ["ENG", "OPS"]
         "issueRefRegex": "",          # optional explicit override (regex, ci)
         "trailerFormat": "Refs: {ISSUE}",
-    },
-    "linear": {
-        "enabled": True,
-        "action": "comment",                 # "comment" | "comment+move"
-        "commentFormat": "Commit `{SHA}` on `{BRANCH}`: {SUBJECT}",
-        "moveToStateName": "",                # e.g. "In Review"; empty = no move
-        "apiUrl": "https://api.linear.app/graphql",
-        "timeoutSeconds": 10,
     },
 }
 
@@ -348,9 +337,17 @@ def evaluate_message(message: str, branch: str, cfg: dict) -> TemplateResult:
     lines = message.splitlines()
     subject = lines[0].strip() if lines else ""
     body_lines = lines[1:]
-    # Strip any pre-existing Refs: trailer so we don't duplicate it.
-    body_lines = [ln for ln in body_lines
-                  if not re.match(r"^\s*Refs:\s*\S+\s*$", ln)]
+    # Strip ONLY a pre-existing stamped trailer (our trailer label + an issue id
+    # we'd re-stamp) so we don't duplicate it. PRESERVE unrelated citations like
+    # `Refs: RFC-2119` or `Refs: <url>` whose value isn't a configured issue id.
+    pat = _issue_regex(cfg)
+    label = re.escape(tmpl["trailerFormat"].split("{ISSUE}")[0].strip())
+
+    def _is_stamped_trailer(ln: str) -> bool:
+        m = re.match(rf"^\s*{label}\s*(\S+)\s*$", ln)
+        return bool(m and pat and pat.search(m.group(1)))
+
+    body_lines = [ln for ln in body_lines if not _is_stamped_trailer(ln)]
     body = "\n".join(body_lines).strip()
 
     if not subject:
@@ -360,7 +357,7 @@ def evaluate_message(message: str, branch: str, cfg: dict) -> TemplateResult:
     if not _subject_regex(cfg).match(subject):
         return TemplateResult(False, deny_reason=(
             f'subject {subject!r} must match "<type>(<scope>): <subject>" '
-            f'(type ∈ {{{", ".join(tmpl["types"])}}}). '
+            f'(type one of: {", ".join(tmpl["types"])}). '
             f'Rewrite the message and commit again.'))
 
     if len(subject) > tmpl["subjectMaxLen"]:
@@ -413,98 +410,22 @@ def head_info(cwd: str | None = None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Dedupe ledger (so the Linear sync never double-posts for one SHA)
+# Final-message validation (used by the commit-msg git hook — the FLOOR)
 # --------------------------------------------------------------------------- #
 
-def _ledger_path(cwd: str | None) -> str:
-    base = cwd or "."
-    r = git("rev-parse", "--git-dir", cwd=cwd)
-    git_dir = r.stdout.strip() if r.returncode == 0 else os.path.join(base, ".git")
-    if not os.path.isabs(git_dir):
-        git_dir = os.path.join(base, git_dir)
-    d = os.path.join(git_dir, "commit-gate")
-    os.makedirs(d, exist_ok=True)
-    return os.path.join(d, "synced.log")
-
-
-def already_synced(sha: str, cwd: str | None = None) -> bool:
-    try:
-        with open(_ledger_path(cwd), "r", encoding="utf-8") as fh:
-            return any(line.split()[0:1] == [sha] for line in fh if line.strip())
-    except OSError:
-        return False
-
-
-def record_synced(sha: str, note: str, cwd: str | None = None) -> None:
-    try:
-        with open(_ledger_path(cwd), "a", encoding="utf-8") as fh:
-            fh.write(f"{sha} {note}\n")
-    except OSError:
-        pass
-
-
-# --------------------------------------------------------------------------- #
-# Linear (deterministic; no model, no MCP)
-# --------------------------------------------------------------------------- #
-
-def _gql(query: str, variables: dict, cfg: dict, token: str) -> dict:
-    payload = json.dumps({"query": query, "variables": variables}).encode()
-    req = urllib.request.Request(
-        cfg["linear"]["apiUrl"], data=payload,
-        headers={"Authorization": token, "Content-Type": "application/json"})
-    with urllib.request.urlopen(
-            req, timeout=cfg["linear"]["timeoutSeconds"]) as resp:
-        return json.load(resp)
-
-
-def linear_sync(issue_id: str, head: dict, cfg: dict) -> tuple[bool, str]:
-    """Post a commit comment (and optionally move state) on the Linear issue.
-    Returns (ok, human_message). Never raises — a failure is reported, never
-    blocks a commit."""
-    token = os.environ.get("LINEAR_API_KEY")
-    if not token:
-        return False, "LINEAR_API_KEY not set; Linear sync skipped"
-    try:
-        # issue(id:) accepts the human identifier (ENG-123) directly.
-        data = _gql("query($id:String!){issue(id:$id){id}}",
-                    {"id": issue_id}, cfg, token)
-        uuid = (data.get("data") or {}).get("issue", {})
-        uuid = uuid.get("id") if isinstance(uuid, dict) else None
-        if not uuid:
-            return False, f"Linear issue {issue_id} not found"
-
-        body = (cfg["linear"]["commentFormat"]
-                .replace("{SHA}", head["sha_short"])
-                .replace("{BRANCH}", head["branch"])
-                .replace("{SUBJECT}", head["subject"]))
-        res = _gql(
-            "mutation($i:String!,$b:String!){"
-            "commentCreate(input:{issueId:$i,body:$b}){success}}",
-            {"i": uuid, "b": body}, cfg, token)
-        ok = ((res.get("data") or {}).get("commentCreate") or {}).get(
-            "success", False)
-
-        moved = ""
-        target = cfg["linear"].get("moveToStateName") or ""
-        if ok and cfg["linear"]["action"] == "comment+move" and target:
-            moved = _move_state(uuid, target, cfg, token)
-        return bool(ok), f"commented on {issue_id}{moved}"
-    except urllib.error.URLError as exc:
-        return False, f"Linear API error: {exc}"
-    except (ValueError, KeyError) as exc:
-        return False, f"Linear response error: {exc}"
-
-
-def _move_state(uuid: str, state_name: str, cfg: dict, token: str) -> str:
-    data = _gql(
-        "query($id:String!){issue(id:$id){team{states{nodes{id name}}}}}",
-        {"id": uuid}, cfg, token)
-    nodes = (((data.get("data") or {}).get("issue") or {}).get("team") or {}) \
-        .get("states", {}).get("nodes", [])
-    sid = next((n["id"] for n in nodes if n.get("name") == state_name), None)
-    if not sid:
-        return f"; state {state_name!r} not found"
-    _gql("mutation($i:String!,$s:String!){"
-         "issueUpdate(id:$i,input:{stateId:$s}){success}}",
-         {"i": uuid, "s": sid}, cfg, token)
-    return f"; moved to {state_name!r}"
+def canonical_message(result: "TemplateResult") -> str:
+    """Render the canonical message: subject, optional body, and the issue
+    trailer (if any). If the body already ends in a trailer block, the issue
+    trailer joins that block (single newline) so `git interpret-trailers` sees
+    one contiguous block rather than two."""
+    out = result.subject
+    if result.body:
+        out += "\n\n" + result.body
+    if result.trailer:
+        sep = "\n\n"
+        if result.body.strip():
+            last = result.body.rstrip().splitlines()[-1]
+            if re.match(r"^[A-Za-z][A-Za-z0-9-]*:\s", last):
+                sep = "\n"
+        out += sep + result.trailer
+    return out

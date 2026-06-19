@@ -6,13 +6,5 @@
     "issuePrefixes": ["ENG", "OPS"],
     "issueRefRegex": "",
     "trailerFormat": "Refs: {ISSUE}"
-  },
-  "linear": {
-    "enabled": true,
-    "action": "comment",
-    "commentFormat": "Commit `{SHA}` on `{BRANCH}`: {SUBJECT}",
-    "moveToStateName": "",
-    "apiUrl": "https://api.linear.app/graphql",
-    "timeoutSeconds": 10
   }
 }
