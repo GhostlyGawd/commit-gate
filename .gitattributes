@@ -1,0 +1,4 @@
+# Force LF in the working tree on every platform. The git hooks and the
+# Python hook scripts carry `#!/usr/bin/env ...` shebangs that break if checked
+# out with CRLF, so normalize line endings regardless of who commits.
+* text=auto eol=lf
