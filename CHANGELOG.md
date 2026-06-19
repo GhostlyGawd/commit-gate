@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Breaking redesign to a layered model (warrants a **2.0.0** release): enforcement
-moves from a blocking PreToolUse hook to a `commit-msg` git hook, and the
-per-commit Linear API integration is removed in favor of native tracker linking.
+## [2.0.0] - 2026-06-19
+
+Breaking redesign to a layered model: enforcement moved from a blocking
+PreToolUse hook to a `commit-msg` git hook, and the per-commit Linear API
+integration was removed in favor of native tracker linking.
 
 ### Added
 
@@ -63,5 +65,6 @@ Initial stable release of commit-gate, a Claude Code plugin that enforces conven
 - **Fail-safe hooks:** An internal error in any hook never blocks the user — commits proceed rather than being held hostage to a plugin bug.
 - **Cross-platform shebang safety:** A `.gitattributes` enforces LF line endings so shell shebangs work consistently across platforms.
 
-[Unreleased]: https://github.com/GhostlyGawd/commit-gate/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/GhostlyGawd/commit-gate/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/GhostlyGawd/commit-gate/releases/tag/v2.0.0
 [1.0.0]: https://github.com/GhostlyGawd/commit-gate/releases/tag/v1.0.0

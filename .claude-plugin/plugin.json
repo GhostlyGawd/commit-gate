@@ -1,6 +1,6 @@
 {
   "name": "commit-gate",
   "description": "Enforce a conventional-commit message template and ensure issue refs on every commit via a commit-msg git hook (the gate), plus an advisory PreToolUse hook that auto-stamps the trailer and nudges the agent (never blocks). Issue linking is delegated to your tracker's native git integration. Carries a skill that installs it.",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "author": { "name": "commit-gate" }
 }
