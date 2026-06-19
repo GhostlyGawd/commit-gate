@@ -1,0 +1,11 @@
+{
+  "name": "commit-gate-marketplace",
+  "owner": { "name": "commit-gate" },
+  "plugins": [
+    {
+      "name": "commit-gate",
+      "description": "Deterministically enforce a commit-message template and update Linear on every git commit, via PreToolUse/PostToolUse hooks.",
+      "source": "./"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy these two keys into the CONSUMING repo's tracked .claude/settings.json (NOT settings.local.json) to auto-distribute commit-gate to your team. The repo below points at GhostlyGawd/commit-gate; change it if you fork. On clone + workspace-trust, teammates are prompted to install the marketplace and the plugin. Delete this _comment key. enabledPlugins is an OBJECT, not an array.",
+  "extraKnownMarketplaces": {
+    "commit-gate-marketplace": {
+      "source": { "source": "github", "repo": "GhostlyGawd/commit-gate" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "commit-gate@commit-gate-marketplace": true
+  }
+}

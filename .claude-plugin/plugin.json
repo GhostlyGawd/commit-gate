@@ -1,0 +1,6 @@
+{
+  "name": "commit-gate",
+  "description": "Deterministically enforce a commit-message template and update Linear on every git commit in an interactive Claude Code session, via PreToolUse/PostToolUse hooks. Carries a skill that installs and documents the machinery.",
+  "version": "1.0.0",
+  "author": { "name": "commit-gate" }
+}

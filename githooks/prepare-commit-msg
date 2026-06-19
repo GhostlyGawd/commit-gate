@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""commit-gate raw-commit backstop: prepare-commit-msg.
+
+Enforces the SAME commit-message template as the in-session PreToolUse hook,
+but at the git layer — so a commit typed in a plain terminal (no Claude session)
+is still templated. Rewrites the message file in place, or aborts (exit 1) when
+the subject is malformed.
+
+Wire it up with:  git config core.hooksPath <plugin>/githooks
+git passes:  $1 = path to the message file, $2 = source, $3 = sha (optional).
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin"))
+import lib_commit as L  # noqa: E402
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        return 0
+    msg_file = sys.argv[1]
+    source = sys.argv[2] if len(sys.argv) > 2 else ""
+    # Don't rewrite merge/squash/commit-template messages.
+    if source in ("merge", "squash", "commit"):
+        return 0
+
+    cwd = os.getcwd()
+    cfg = L.load_config(cwd)
+    try:
+        with open(msg_file, "r", encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError:
+        return 0
+
+    # Ignore the comment lines git appends to the message file.
+    stripped = "\n".join(ln for ln in raw.splitlines()
+                         if not ln.lstrip().startswith("#"))
+    branch = L.head_info(cwd)["branch"]
+    result = L.evaluate_message(stripped, branch, cfg)
+    if not result.ok:
+        sys.stderr.write(f"commit-gate: {result.deny_reason}\n")
+        return 1  # abort the commit
+
+    canonical = result.subject
+    if result.body:
+        canonical += "\n\n" + result.body
+    if result.trailer:
+        canonical += "\n\n" + result.trailer
+    with open(msg_file, "w", encoding="utf-8") as fh:
+        fh.write(canonical + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

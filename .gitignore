@@ -1,0 +1,7 @@
+# Python build artifacts (the hooks/installer are stdlib scripts; nothing to build)
+__pycache__/
+*.pyc
+
+# Never commit a real Linear token or a machine-local config override
+.env
+*.local.json

@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""commit-gate raw-commit backstop: post-commit.
+
+Performs the SAME deterministic Linear sync as the in-session PostToolUse hook,
+for commits made outside a Claude session. Reads HEAD, finds the issue id, and
+calls the Linear API directly. Never blocks (post-commit cannot abort anyway).
+
+Requires LINEAR_API_KEY in the environment. Wired via core.hooksPath.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin"))
+import lib_commit as L  # noqa: E402
+
+
+def main() -> int:
+    cwd = os.getcwd()
+    cfg = L.load_config(cwd)
+    if not cfg["linear"]["enabled"]:
+        return 0
+    head = L.head_info(cwd)
+    if not head["sha"]:
+        return 0
+    if L.already_synced(head["sha"], cwd):
+        return 0
+    issue = L.find_issue(head["body"], head["branch"], cfg=cfg)
+    if not issue:
+        L.record_synced(head["sha"], "skip:no-issue", cwd)
+        return 0
+    ok, note = L.linear_sync(issue, head, cfg)
+    if ok:  # only record terminal success; let transient failures retry
+        L.record_synced(head["sha"], f"ok:{note}", cwd)
+    sys.stderr.write(f"commit-gate: {note}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
