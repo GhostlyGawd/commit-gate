@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `RELEASING.md` — release-process checklist (SemVer + Keep a Changelog).
+
 ## [1.0.0] - 2026-06-19
 
 Initial stable release of commit-gate, a Claude Code plugin that enforces conventional-commit messages and keeps Linear in sync.
